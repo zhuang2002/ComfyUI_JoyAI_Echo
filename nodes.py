@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import numpy as np
 
 
 DENOISING_SIGMAS = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0]
@@ -29,6 +28,83 @@ def _empty_cache():
 def _move(module, device):
     if module is not None:
         module.to(device)
+
+
+class SequentialOffloader:
+    """Layer-by-layer GPU offloading for the DiT transformer blocks.
+
+    Hooks into each transformer block so that only the currently-executing block
+    resides on GPU. All other blocks stay on CPU/pinned memory.
+    Peak VRAM for the generator drops from ~30GB to ~2-3GB (1 block + activations).
+    """
+
+    def __init__(self, generator, device: torch.device, pin_memory: bool = True):
+        self._generator = generator
+        self._device = device
+        self._hooks: list[torch.utils.hooks.RemovableHook] = []
+        self._pin_memory = pin_memory
+        self._installed = False
+
+    def install(self):
+        """Install forward hooks on transformer blocks and move them to CPU."""
+        if self._installed:
+            return
+        self._installed = True
+
+        velocity_model = self._generator.model.velocity_model
+        blocks = velocity_model.transformer_blocks
+
+        # Keep pre/post processing layers on GPU (small footprint)
+        for name, param in velocity_model.named_parameters():
+            if "transformer_blocks" not in name:
+                param.data = param.data.to(self._device)
+        for name, buf in velocity_model.named_buffers():
+            if "transformer_blocks" not in name:
+                buf.data = buf.data.to(self._device)
+
+        # Move all blocks to CPU (optionally pinned)
+        for block in blocks:
+            block.to("cpu")
+            if self._pin_memory and torch.cuda.is_available():
+                for param in block.parameters():
+                    param.data = param.data.pin_memory()
+                for buf in block.buffers():
+                    buf.data = buf.data.pin_memory()
+
+        # Also keep the wrapper's patchifiers and X0Model's non-block params on GPU
+        for name, param in self._generator.named_parameters():
+            if "velocity_model.transformer_blocks" not in name and "velocity_model" not in name:
+                param.data = param.data.to(self._device)
+        for name, buf in self._generator.named_buffers():
+            if "velocity_model.transformer_blocks" not in name and "velocity_model" not in name:
+                buf.data = buf.data.to(self._device)
+
+        def make_pre_hook(block_module):
+            def hook(module, args):
+                block_module.to(self._device, non_blocking=True)
+                if torch.cuda.is_available():
+                    torch.cuda.current_stream().synchronize()
+            return hook
+
+        def make_post_hook(block_module):
+            def hook(module, args, output):
+                block_module.to("cpu", non_blocking=True)
+            return hook
+
+        for block in blocks:
+            h1 = block.register_forward_pre_hook(make_pre_hook(block))
+            h2 = block.register_forward_hook(make_post_hook(block))
+            self._hooks.extend([h1, h2])
+
+        print(f"[JoyEcho] Sequential offloading installed: {len(blocks)} blocks", flush=True)
+
+    def remove(self):
+        """Remove all hooks and move entire generator back to CPU."""
+        for h in self._hooks:
+            h.remove()
+        self._hooks.clear()
+        self._installed = False
+        self._generator.to("cpu")
 
 
 class JoyEcho_ModelLoader:
@@ -52,6 +128,11 @@ class JoyEcho_ModelLoader:
                 "lora_strength": ("FLOAT", {
                     "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
                 }),
+                "low_vram": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Load text encoder on CPU for 24GB GPUs. "
+                               "Encoding will be slower but uses no GPU memory.",
+                }),
             },
         }
 
@@ -61,7 +142,8 @@ class JoyEcho_ModelLoader:
     CATEGORY = "JoyAI-Echo"
 
     def load_model(self, checkpoint_path: str, gemma_path: str,
-                   lora_path: str = "", lora_strength: float = 1.0):
+                   lora_path: str = "", lora_strength: float = 1.0,
+                   low_vram: bool = False):
         from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
         from ltx_distillation.models.ltx_wrapper import create_ltx2_wrapper
         from ltx_distillation.models.text_encoder_wrapper import create_text_encoder_wrapper
@@ -73,12 +155,13 @@ class JoyEcho_ModelLoader:
         device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         dtype = torch.bfloat16
 
-        # Load text encoder to GPU (will be released after encoding)
-        print("[JoyEcho] Loading text encoder (bf16)...", flush=True)
+        # Load text encoder
+        text_encoder_device = torch.device("cpu") if low_vram else device
+        print(f"[JoyEcho] Loading text encoder (bf16) on {text_encoder_device}...", flush=True)
         text_encoder = create_text_encoder_wrapper(
             checkpoint_path=checkpoint_path,
             gemma_path=gemma_path,
-            device=device,
+            device=text_encoder_device,
             dtype=dtype,
         )
         text_encoder.eval()
@@ -264,6 +347,11 @@ class JoyEcho_Generate:
                 "num_fix_frames": ("INT", {"default": 3, "min": 0, "max": 10}),
                 "enable_audio_memory": ("BOOLEAN", {"default": True}),
                 "audio_memory_window_size": ("INT", {"default": 96, "min": 16, "max": 256}),
+                "sequential_offload": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Enable layer-by-layer GPU offloading for DiT. "
+                               "Reduces VRAM from ~30GB to ~3GB at the cost of slower inference.",
+                }),
             },
         }
 
@@ -287,6 +375,7 @@ class JoyEcho_Generate:
         num_fix_frames: int = 3,
         enable_audio_memory: bool = True,
         audio_memory_window_size: int = 96,
+        sequential_offload: bool = False,
     ):
         from ltx_distillation.inference.bidirectional_pipeline import BidirectionalAVInferencePipeline
         from ltx_distillation.inference.memory_bidirectional_pipeline import BidirectionalMemoryAVInferencePipeline
@@ -355,8 +444,13 @@ class JoyEcho_Generate:
         all_audio_waveforms = []
 
         num_shots = len(conditioning)
+        offloader = None
+        if sequential_offload:
+            offloader = SequentialOffloader(generator, device)
+
         print(f"[JoyEcho] Generating {num_shots} shot(s) at {video_width}x{video_height}, "
-              f"{num_frames} frames...", flush=True)
+              f"{num_frames} frames{' [sequential offload]' if sequential_offload else ''}...",
+              flush=True)
 
         for shot_idx in range(num_shots):
             prompt_seed = seed + shot_idx
@@ -374,7 +468,10 @@ class JoyEcho_Generate:
             _move(audio_vae.encoder, "cpu")
             _move(audio_vae.decoder, "cpu")
             _move(audio_vae.vocoder, "cpu")
-            _move(generator, device)
+            if sequential_offload:
+                offloader.install()
+            else:
+                _move(generator, device)
             _empty_cache()
 
             with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
@@ -434,6 +531,8 @@ class JoyEcho_Generate:
             )
 
             # --- Phase B: Decode (generator off GPU, VAE on GPU) ---
+            if sequential_offload:
+                offloader.remove()
             _move(generator, "cpu")
             _empty_cache()
             _move(video_vae.decoder, device)

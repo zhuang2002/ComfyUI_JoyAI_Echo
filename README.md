@@ -12,6 +12,7 @@ This implementation is **faithful to the official inference pipeline** with zero
 
 - NVIDIA GPU with **48GB+ VRAM** (A6000/H100/A100 80GB recommended)
   - With hot-swap enabled: peak ~46GB during denoise phase
+  - With **sequential offload** enabled: **24GB VRAM** sufficient (slower inference)
 - Python 3.11+
 - PyTorch 2.4+ with CUDA support
 - ffmpeg (for video concatenation)
@@ -83,6 +84,7 @@ Runs the full inference pipeline with paired audio-video memory bank.
 | memory_max_size | INT | 7 | Max memory bank slots |
 | num_fix_frames | INT | 3 | Fixed (non-evictable) memory slots |
 | enable_audio_memory | BOOLEAN | True | Enable audio memory conditioning |
+| sequential_offload | BOOLEAN | False | Layer-by-layer offloading (24GB VRAM, slower) |
 
 **Outputs**: IMAGE (all frames concatenated) + AUDIO (combined waveform)
 
@@ -95,6 +97,16 @@ The node uses the same hot-swap strategy as the official code:
 3. **Decode phase**: Generator moved to CPU, VAE decoders + vocoder on GPU
 
 This ensures peak VRAM never exceeds ~48GB despite the model totaling ~70GB+ in parameters.
+
+### Sequential Offload Mode (24GB GPUs)
+
+Enable `sequential_offload` in the Generate node to run on 24GB cards (e.g. RTX 4090, 3090):
+
+- Only one transformer block (~600MB) is loaded to GPU at a time
+- Non-block layers (~2GB) stay on GPU permanently
+- Blocks use pinned CPU memory for fast transfers
+- **Trade-off**: ~3-5x slower inference per shot (CPU↔GPU transfers per block per denoising step)
+- **Zero precision loss** — identical output to full-VRAM mode
 
 ## Workflow Example
 
