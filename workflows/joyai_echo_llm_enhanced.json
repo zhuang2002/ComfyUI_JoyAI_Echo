@@ -1,0 +1,219 @@
+{
+  "last_node_id": 6,
+  "last_link_id": 6,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "JoyEcho_LLMEnhance",
+      "pos": [100, 300],
+      "size": [450, 320],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "prompts_json",
+          "type": "STRING",
+          "links": [1],
+          "slot_index": 0
+        }
+      ],
+      "title": "JoyEcho LLM Enhance",
+      "properties": {
+        "Node name for S&R": "JoyEcho_LLMEnhance"
+      },
+      "widgets_values": [
+        "A young woman records a quiet evening vlog in her cozy room, reflecting on life and finding warmth in small things.",
+        "long_story (multi-shot)",
+        "",
+        "https://api.openai.com/v1",
+        "gpt-4o",
+        0,
+        0.7
+      ]
+    },
+    {
+      "id": 2,
+      "type": "JoyEcho_ModelLoader",
+      "pos": [100, 700],
+      "size": [430, 200],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "model",
+          "type": "JOYECHO_MODEL",
+          "links": [2],
+          "slot_index": 0
+        }
+      ],
+      "title": "JoyEcho Model Loader",
+      "properties": {
+        "Node name for S&R": "JoyEcho_ModelLoader"
+      },
+      "widgets_values": [
+        "/pfs/lihaoran/Code/Echo-release-0602/JoyAI-Echo-release.safetensors",
+        "/pfs/lihaoran/Code/LTX-2_jd/checkpoints/gemma-3-12b",
+        "",
+        1.0,
+        false
+      ]
+    },
+    {
+      "id": 3,
+      "type": "JoyEcho_TextEncode",
+      "pos": [650, 450],
+      "size": [450, 250],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "JOYECHO_MODEL",
+          "link": 2
+        },
+        {
+          "name": "prompts",
+          "type": "STRING",
+          "link": 1,
+          "widget": {
+            "name": "prompts"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "JOYECHO_MODEL",
+          "links": [3],
+          "slot_index": 0
+        },
+        {
+          "name": "conditioning",
+          "type": "JOYECHO_COND",
+          "links": [4],
+          "slot_index": 1
+        }
+      ],
+      "title": "JoyEcho Text Encode",
+      "properties": {
+        "Node name for S&R": "JoyEcho_TextEncode"
+      },
+      "widgets_values": [
+        "",
+        true
+      ]
+    },
+    {
+      "id": 4,
+      "type": "JoyEcho_Generate",
+      "pos": [1200, 450],
+      "size": [380, 450],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "JOYECHO_MODEL",
+          "link": 3
+        },
+        {
+          "name": "conditioning",
+          "type": "JOYECHO_COND",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [5],
+          "slot_index": 0
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [6],
+          "slot_index": 1
+        }
+      ],
+      "title": "JoyEcho Generate (Multi-Shot)",
+      "properties": {
+        "Node name for S&R": "JoyEcho_Generate"
+      },
+      "widgets_values": [
+        12345,
+        241,
+        736,
+        1280,
+        25,
+        2.0,
+        7,
+        3,
+        true,
+        96,
+        false
+      ]
+    },
+    {
+      "id": 5,
+      "type": "PreviewImage",
+      "pos": [1680, 400],
+      "size": [300, 300],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 5
+        }
+      ],
+      "title": "Preview Frames",
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      }
+    },
+    {
+      "id": 6,
+      "type": "PreviewAudio",
+      "pos": [1680, 750],
+      "size": [300, 100],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 6
+        }
+      ],
+      "title": "Preview Audio",
+      "properties": {
+        "Node name for S&R": "PreviewAudio"
+      }
+    }
+  ],
+  "links": [
+    [1, 1, 0, 3, 1, "STRING"],
+    [2, 2, 0, 3, 0, "JOYECHO_MODEL"],
+    [3, 3, 0, 4, 0, "JOYECHO_MODEL"],
+    [4, 3, 1, 4, 1, "JOYECHO_COND"],
+    [5, 4, 0, 5, 0, "IMAGE"],
+    [6, 4, 1, 6, 0, "AUDIO"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.65,
+      "offset": [50, 50]
+    }
+  },
+  "version": 0.4
+}

@@ -1,10 +1,11 @@
 """JoyAI-Echo ComfyUI node implementations.
 
-Four nodes faithful to the official inference.py:
+Five nodes faithful to the official inference.py:
 1. JoyEcho_ModelLoader   — load text encoder + DiT + VAEs (bf16)
 2. JoyEcho_TextEncode    — encode prompts, auto-release text encoder
 3. JoyEcho_Generate      — multi-shot denoise + decode with memory bank
-4. JoyEcho_PromptFormat  — format prompts from structured input (helper)
+4. JoyEcho_PromptFormat  — get system prompt for LLM-based prompt enhancement
+5. JoyEcho_LLMEnhance   — call LLM API to generate shot prompts from a story idea
 """
 
 from __future__ import annotations
@@ -259,7 +260,10 @@ class JoyEcho_TextEncode:
 
         # Check if it's a file path to a .json
         if text.endswith(".json") and not text.startswith("{"):
-            p = Path(text).expanduser().resolve()
+            p = Path(text).expanduser()
+            if not p.is_absolute():
+                p = Path(__file__).resolve().parent / p
+            p = p.resolve()
             if p.exists():
                 with open(p, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -604,45 +608,18 @@ class JoyEcho_Generate:
         return (images, audio_out,)
 
 
-LONG_STORY_SYSTEM_PROMPT = """\
-You are a professional shot-prompt writer for a joint audio-video generation model.
-Given a user's story, expand it into an ordered sequence of shot prompts.
-Each shot is one ~10-second clip with synchronized video and audio.
+_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
-Output MUST be a single valid JSON: {"prompts": ["<shot 1>", "<shot 2>", ...]}
 
-For each shot paragraph, include (as natural prose):
-1. Character identity (age, build, hair, face) + clothing (repeat VERBATIM across shots)
-2. Action: begin with "At normal speed, " then temporal action
-3. Style: visual aesthetic, palette, mood
-4. Camera: framing and motion
-5. Background: setting and lighting
-6. Sound effects: diegetic environmental sounds
-7. Background music: state explicitly (often "No prominent background music" for dialogue)
-For speaking characters, also add: voice description, lip-sync note, spoken line.
-
-Keep actions simple and physically plausible. Limit to 2 characters per shot max.
-Default to 15 shots if the user doesn't specify a number.
-"""
-
-SHORT_STORY_SYSTEM_PROMPT = """\
-You are a professional shot-prompt writer for a joint audio-video generation model.
-Given a user's idea, expand it into a SINGLE shot prompt (~10 seconds).
-
-Output MUST be: {"prompts": ["<the shot prompt>"]}
-
-The shot paragraph includes (as natural prose):
-1. Character identity + clothing
-2. Action: "At normal speed, " then temporal action
-3. Style: visual aesthetic, palette, mood
-4. Camera: framing and motion
-5. Background: setting and lighting
-6. Sound effects
-7. Background music
-For speaking characters: voice sentence, lip-sync note, spoken line.
-
-Keep actions simple. One clear scene, no mid-shot jumps.
-"""
+def _load_system_prompt(mode: str) -> str:
+    """Load the full system prompt from the bundled markdown file."""
+    if "long" in mode:
+        fp = _PROMPTS_DIR / "long_story_writer_system_prompt.md"
+    else:
+        fp = _PROMPTS_DIR / "short_story_writer_system_prompt.md"
+    if fp.exists():
+        return fp.read_text(encoding="utf-8").strip()
+    raise FileNotFoundError(f"System prompt not found: {fp}")
 
 
 class JoyEcho_PromptFormat:
@@ -668,6 +645,121 @@ class JoyEcho_PromptFormat:
     CATEGORY = "JoyAI-Echo"
 
     def get_prompt(self, mode: str):
-        if "long" in mode:
-            return (LONG_STORY_SYSTEM_PROMPT,)
-        return (SHORT_STORY_SYSTEM_PROMPT,)
+        return (_load_system_prompt(mode),)
+
+
+class JoyEcho_LLMEnhance:
+    """Call a cloud LLM API to expand a short story idea into JoyAI-Echo shot prompts.
+
+    Supports OpenAI-compatible APIs (OpenAI, DeepSeek, etc.).
+    The output JSON can be fed directly into JoyEcho_TextEncode.
+    Uses only cloud API calls — zero local GPU memory.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "story_idea": ("STRING", {
+                    "multiline": True,
+                    "default": "A young woman records a quiet evening vlog in her cozy room, reflecting on life and finding warmth in small things.",
+                    "tooltip": "Describe your story or scene idea in a few sentences.",
+                }),
+                "mode": (["long_story (multi-shot)", "short_story (single-shot)"],),
+                "api_key": ("STRING", {
+                    "default": "",
+                    "tooltip": "Your API key (OpenAI, DeepSeek, etc.)",
+                }),
+            },
+            "optional": {
+                "base_url": ("STRING", {
+                    "default": "https://api.openai.com/v1",
+                    "tooltip": "API base URL. Use https://api.deepseek.com/v1 for DeepSeek, etc.",
+                }),
+                "model_name": ("STRING", {
+                    "default": "gpt-4o",
+                    "tooltip": "Model name (gpt-4o, deepseek-chat, claude-3-5-sonnet, etc.)",
+                }),
+                "num_shots": ("INT", {
+                    "default": 0, "min": 0, "max": 30,
+                    "tooltip": "Number of shots to generate (0 = let LLM decide, default 15 for long story).",
+                }),
+                "temperature": ("FLOAT", {
+                    "default": 0.7, "min": 0.0, "max": 2.0, "step": 0.05,
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("prompts_json",)
+    FUNCTION = "enhance"
+    CATEGORY = "JoyAI-Echo"
+
+    def enhance(
+        self,
+        story_idea: str,
+        mode: str,
+        api_key: str,
+        base_url: str = "https://api.openai.com/v1",
+        model_name: str = "gpt-4o",
+        num_shots: int = 0,
+        temperature: float = 0.7,
+    ):
+        import urllib.request
+        import urllib.error
+
+        if not api_key.strip():
+            raise ValueError("API key is required. Enter your OpenAI/DeepSeek/etc. API key.")
+
+        system_prompt = _load_system_prompt(mode)
+
+        user_msg = story_idea.strip()
+        if num_shots > 0:
+            user_msg += f"\n\nGenerate exactly {num_shots} shots."
+
+        url = base_url.rstrip("/") + "/chat/completions"
+        payload = json.dumps({
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": temperature,
+            "max_tokens": 16384,
+        }).encode("utf-8")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key.strip()}",
+        }
+
+        print(f"[JoyEcho] Calling LLM ({model_name}) to enhance prompt...", flush=True)
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"LLM API error {e.code}: {body}")
+
+        content = result["choices"][0]["message"]["content"].strip()
+
+        # Strip markdown code fences if present
+        if content.startswith("```"):
+            lines = content.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            content = "\n".join(lines).strip()
+
+        # Validate JSON
+        try:
+            data = json.loads(content)
+            if "prompts" not in data or not isinstance(data["prompts"], list):
+                raise ValueError("LLM output missing 'prompts' array")
+            num = len(data["prompts"])
+        except (json.JSONDecodeError, ValueError) as e:
+            raise RuntimeError(
+                f"LLM returned invalid JSON: {e}\n\nRaw output:\n{content[:500]}"
+            )
+
+        print(f"[JoyEcho] LLM generated {num} shot prompt(s).", flush=True)
+        return (content,)

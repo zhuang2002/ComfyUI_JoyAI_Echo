@@ -1,0 +1,180 @@
+{
+  "last_node_id": 5,
+  "last_link_id": 5,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "JoyEcho_ModelLoader",
+      "pos": [100, 300],
+      "size": [430, 200],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "model",
+          "type": "JOYECHO_MODEL",
+          "links": [1],
+          "slot_index": 0
+        }
+      ],
+      "title": "JoyEcho Model Loader",
+      "properties": {
+        "Node name for S&R": "JoyEcho_ModelLoader"
+      },
+      "widgets_values": [
+        "/pfs/lihaoran/Code/Echo-release-0602/JoyAI-Echo-release.safetensors",
+        "/pfs/lihaoran/Code/LTX-2_jd/checkpoints/gemma-3-12b",
+        "",
+        1.0,
+        false
+      ]
+    },
+    {
+      "id": 2,
+      "type": "JoyEcho_TextEncode",
+      "pos": [620, 300],
+      "size": [500, 300],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "JOYECHO_MODEL",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "JOYECHO_MODEL",
+          "links": [2],
+          "slot_index": 0
+        },
+        {
+          "name": "conditioning",
+          "type": "JOYECHO_COND",
+          "links": [3],
+          "slot_index": 1
+        }
+      ],
+      "title": "JoyEcho Text Encode",
+      "properties": {
+        "Node name for S&R": "JoyEcho_TextEncode"
+      },
+      "widgets_values": [
+        "prompts/test_001.json",
+        true
+      ]
+    },
+    {
+      "id": 3,
+      "type": "JoyEcho_Generate",
+      "pos": [1220, 300],
+      "size": [380, 450],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "JOYECHO_MODEL",
+          "link": 2
+        },
+        {
+          "name": "conditioning",
+          "type": "JOYECHO_COND",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [4],
+          "slot_index": 0
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [5],
+          "slot_index": 1
+        }
+      ],
+      "title": "JoyEcho Generate (Multi-Shot)",
+      "properties": {
+        "Node name for S&R": "JoyEcho_Generate"
+      },
+      "widgets_values": [
+        12345,
+        241,
+        736,
+        1280,
+        25,
+        2.0,
+        7,
+        3,
+        true,
+        96,
+        false
+      ]
+    },
+    {
+      "id": 4,
+      "type": "PreviewImage",
+      "pos": [1700, 250],
+      "size": [300, 300],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 4
+        }
+      ],
+      "title": "Preview Frames",
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      }
+    },
+    {
+      "id": 5,
+      "type": "PreviewAudio",
+      "pos": [1700, 600],
+      "size": [300, 100],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 5
+        }
+      ],
+      "title": "Preview Audio",
+      "properties": {
+        "Node name for S&R": "PreviewAudio"
+      }
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "JOYECHO_MODEL"],
+    [2, 2, 0, 3, 0, "JOYECHO_MODEL"],
+    [3, 2, 1, 3, 1, "JOYECHO_COND"],
+    [4, 3, 0, 4, 0, "IMAGE"],
+    [5, 3, 1, 5, 0, "AUDIO"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.7,
+      "offset": [50, 100]
+    }
+  },
+  "version": 0.4
+}

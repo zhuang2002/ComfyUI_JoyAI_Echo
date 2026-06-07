@@ -7,6 +7,7 @@ This implementation is **faithful to the official inference pipeline** with zero
 - **Full bf16 precision** for text encoder (Gemma-3-12b) — no GGUF quantization
 - **Correct parameters** matching official defaults (1280x736, 241 frames, 25fps)
 - **GPU memory optimization** via module hot-swap (no quality degradation)
+- **Built-in LLM prompt enhancement** via cloud API (zero local VRAM usage)
 
 ## Requirements
 
@@ -39,7 +40,7 @@ Or let ComfyUI auto-install via `install.py` on first launch.
 
 | File | Size | Source |
 |------|------|--------|
-| `echo-longvideo-release.safetensors` | ~46 GB | [HuggingFace](https://huggingface.co/jdopensource/JoyAI-Echo) |
+| `JoyAI-Echo-release.safetensors` | ~46 GB | [HuggingFace](https://huggingface.co/jdopensource/JoyAI-Echo) |
 | `gemma-3-12b-it/` (full bf16) | ~24 GB | [HuggingFace](https://huggingface.co/google/gemma-3-12b-it) |
 
 Place them anywhere accessible. You'll provide paths in the nodes.
@@ -52,24 +53,29 @@ Loads all model components (text encoder, DiT generator, VAEs).
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
-| checkpoint_path | STRING | — | Path to `echo-longvideo-release.safetensors` |
+| checkpoint_path | STRING | — | Path to `JoyAI-Echo-release.safetensors` |
 | gemma_path | STRING | — | Path to `gemma-3-12b-it` directory |
 | lora_path | STRING | "" | Optional LoRA weights for memory conditioning |
 | lora_strength | FLOAT | 1.0 | LoRA strength |
+| low_vram | BOOLEAN | False | Load text encoder on CPU (saves ~24GB VRAM) |
 
 ### JoyEcho Text Encode
 
-Encodes text prompts using Gemma-3-12b. One prompt per line = one shot.
+Encodes text prompts using Gemma-3-12b. Supports multiple input formats:
+
+- **One prompt per line** — each line is one shot
+- **JSON object** — `{"prompts": ["shot1", "shot2", ...]}`
+- **JSON file path** — path to a `.json` file (absolute or relative to the node directory)
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | model | JOYECHO_MODEL | — | From Model Loader |
-| prompts | STRING | — | Multi-line text, one shot per line |
+| prompts | STRING | — | Multi-line text, JSON, or `.json` file path |
 | release_text_encoder | BOOLEAN | True | Free ~24GB VRAM after encoding |
 
 ### JoyEcho Generate (Multi-Shot)
 
-Runs the full inference pipeline with paired audio-video memory bank.
+Runs the full inference pipeline with **paired audio-video memory bank**. Each shot is conditioned on previous shots through visual identity and voice timbre memory, maintaining story-level consistency.
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -84,9 +90,74 @@ Runs the full inference pipeline with paired audio-video memory bank.
 | memory_max_size | INT | 7 | Max memory bank slots |
 | num_fix_frames | INT | 3 | Fixed (non-evictable) memory slots |
 | enable_audio_memory | BOOLEAN | True | Enable audio memory conditioning |
+| audio_memory_window_size | INT | 96 | Audio memory window size |
 | sequential_offload | BOOLEAN | False | Layer-by-layer offloading (24GB VRAM, slower) |
 
 **Outputs**: IMAGE (all frames concatenated) + AUDIO (combined waveform)
+
+### JoyEcho LLM Enhance
+
+Calls a cloud LLM API to automatically expand a short story idea into properly formatted shot prompts. **Uses zero local GPU memory** — only cloud API calls.
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| story_idea | STRING | — | Your story or scene idea in a few sentences |
+| mode | ENUM | long_story | `long_story (multi-shot)` or `short_story (single-shot)` |
+| api_key | STRING | — | Your API key (OpenAI, DeepSeek, etc.) |
+| base_url | STRING | `https://api.openai.com/v1` | API base URL |
+| model_name | STRING | gpt-4o | LLM model name |
+| num_shots | INT | 0 | Number of shots (0 = let LLM decide) |
+| temperature | FLOAT | 0.7 | Sampling temperature |
+
+Supported API providers (any OpenAI-compatible API):
+- **OpenAI**: base_url = `https://api.openai.com/v1`, model = `gpt-4o`
+- **DeepSeek**: base_url = `https://api.deepseek.com/v1`, model = `deepseek-chat`
+- **Other**: Any OpenAI-compatible endpoint
+
+### JoyEcho Prompt Format (Helper)
+
+Outputs the official system prompt for LLM-based prompt writing. Use this with external LLM nodes if you prefer to handle the API call yourself.
+
+## Workflows
+
+Two ready-to-use workflows are included in the `workflows/` directory:
+
+### Basic Workflow (`joyai_echo_basic.json`)
+
+```
+[Model Loader] → [Text Encode] → [Generate] → [Preview Image]
+                                              → [Preview Audio]
+```
+
+Loads a prompt JSON file and generates multi-shot video with memory. The Text Encode node is pre-configured with `prompts/test_001.json` (15-shot vlog story).
+
+### LLM Enhanced Workflow (`joyai_echo_llm_enhanced.json`)
+
+```
+[LLM Enhance] → [Text Encode] → [Generate] → [Preview Image]
+[Model Loader] ↗                             → [Preview Audio]
+```
+
+Enter a story idea in natural language → LLM generates shot prompts → model generates video with paired memory.
+
+## Example Prompts
+
+8 test prompt files are included in `prompts/`:
+
+| File | Shots | Description |
+|------|-------|-------------|
+| test_001.json | 15 | Young woman recording evening vlog |
+| test_002.json | 15 | Cafe reflection story |
+| test_003.json | 15 | Park walk narrative |
+| test_004.json | 15 | Kitchen cooking scene |
+| test_005.json | 15 | Library study session |
+| test_006.json | 15 | Morning routine |
+| test_007.json | 15 | Art studio session |
+| test_008.json | 15 | Rainy day at home |
+
+System prompts for LLM-based prompt writing:
+- `prompts/long_story_writer_system_prompt.md` — multi-shot story generation
+- `prompts/short_story_writer_system_prompt.md` — single-shot scene generation
 
 ## Memory Management
 
@@ -98,6 +169,13 @@ The node uses the same hot-swap strategy as the official code:
 
 This ensures peak VRAM never exceeds ~48GB despite the model totaling ~70GB+ in parameters.
 
+### Paired Audio-Video Memory Bank
+
+For multi-shot generation, the memory bank maintains:
+- **Video memory**: Key frames from previous shots for visual identity consistency
+- **Audio memory**: Voice timbre and audio characteristics for audio consistency
+- Memory slots are managed with configurable max size and fixed slots
+
 ### Sequential Offload Mode (24GB GPUs)
 
 Enable `sequential_offload` in the Generate node to run on 24GB cards (e.g. RTX 4090, 3090):
@@ -105,34 +183,16 @@ Enable `sequential_offload` in the Generate node to run on 24GB cards (e.g. RTX 
 - Only one transformer block (~600MB) is loaded to GPU at a time
 - Non-block layers (~2GB) stay on GPU permanently
 - Blocks use pinned CPU memory for fast transfers
-- **Trade-off**: ~3-5x slower inference per shot (CPU↔GPU transfers per block per denoising step)
+- **Trade-off**: ~3-5x slower inference per shot
 - **Zero precision loss** — identical output to full-VRAM mode
-
-## Workflow Example
-
-```
-[JoyEcho Model Loader] → [JoyEcho Text Encode] → [JoyEcho Generate] → [Preview Image]
-                                                                     → [Preview Audio]
-```
-
-For multi-shot stories, enter multiple lines in the Text Encode node:
-
-```
-A young woman with long black hair sits at a cafe table, speaking softly...
-The same woman walks through a rainy street, her voice narrating...
-She arrives at a bookstore, the bell chiming as she enters...
-```
-
-Each line generates one shot. The memory bank automatically maintains visual and audio consistency across shots.
 
 ## Differences from Official Pipeline
 
 This node produces **identical results** to `python inference.py` when using the same parameters:
 - Same denoising schedule (8 steps, DMD distilled sigmas)
-- Same flow-matching noise formula: `x_t = (1 - sigma) * x_0 + sigma * noise`
-- Same stochastic re-corruption at each step
+- Same flow-matching noise formula
 - Same paired audio-video memory bank with max_response window selection
-- Same RoPE position encoding (VIDEO_FPS=24.0 for temporal positions)
+- Same RoPE position encoding
 
 ## Acknowledgements
 
